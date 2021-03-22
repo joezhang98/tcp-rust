@@ -153,9 +153,9 @@ impl Connection {
             .set_payload_len(size - self.ip.header_len() as usize);
 
         // the kernel is nice and does this for us
-        // self.tcp.checksum = self.tcp
-        //     .calc_checksum_ipv4(&self.ip, &[])
-        //     .expect("failed to compute checksum");
+        self.tcp.checksum = self.tcp
+            .calc_checksum_ipv4(&self.ip, &[])
+            .expect("failed to compute checksum");
 
         // write out the headers
         use std::io::Write;
@@ -247,8 +247,6 @@ impl Connection {
             return Ok(());
         }
         self.recv.nxt = seqn.wrapping_add(slen);
-        // TODO: if _not_ acceptable, send ACK
-        //  <SEQ=SND.NXT><ACK=RCV.NXT><CTL=ACK>
 
         if !tcph.ack() {
             return Ok(());
@@ -256,7 +254,11 @@ impl Connection {
 
         let ackn = tcph.acknowledgment_number();
         if let State::SynRcvd = self.state {
-            if !is_between_wrapped(self.send.una.wrapping_sub(1), ackn, self.send.nxt.wrapping_add(1)) {
+            if is_between_wrapped(
+                self.send.una.wrapping_sub(1),
+                ackn,
+                self.send.nxt.wrapping_add(1)
+            ) {
                 // must have ACKed our SYN, since we detected at least one acked byte,
                 // and we have only send one byte (the SYN).
                 self.state = State::Estab;
@@ -265,7 +267,7 @@ impl Connection {
             }
         }
 
-        if let State::Estab = self.state {
+        if let State::Estab | State::FinWait1 | State::FinWait2 = self.state {
             if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
                 return Ok(());
             }
@@ -273,11 +275,13 @@ impl Connection {
             // TODO
             assert!(data.is_empty());
 
-            // now let's terminate the connection!
-            // TODO: needs to be stored in the retransmission queue!
-            self.tcp.fin = true;
-            self.write(nic, &[])?;
-            self.state = State::FinWait1;
+            if let State::Estab = self.state {
+                // now let's terminate the connection!
+                // TODO: needs to be stored in the retransmission queue!
+                self.tcp.fin = true;
+                self.write(nic, &[])?;
+                self.state = State::FinWait1;
+            }
         }
 
         if let State::FinWait1 = self.state {
